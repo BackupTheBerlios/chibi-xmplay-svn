@@ -2454,7 +2454,7 @@ static void _xm_player_process_tick() {
 	/** DECREMENT TICK */
 	p->tick_counter++;
 	
-	_XM_DEBUG_PRINTF("playing row %i, order %i\n",p->current_row,p->current_order);
+/*	_XM_DEBUG_PRINTF("playing row %i, order %i\n",p->current_row,p->current_order); */
 }
 
 
@@ -2565,16 +2565,13 @@ XM_Song *xm_song_alloc() {
 		_XM_ERROR_PRINTF("XM MEMORY MANAGER NOT CONFIGURED");
 		return 0;
 	}
-	_XM_DEBUG_PRINTF("1 - mem at %p\n",_xm_memory);
+	
 	song=_xm_memory->alloc( sizeof(XM_Song), XM_MEMORY_ALLOC_SONG_HEADER );
-	_XM_DEBUG_PRINTF("2\n");
 	
 	_xm_zero_mem( song, sizeof(XM_Song) );
-	_XM_DEBUG_PRINTF("3\n");
 	
 	song->tempo=125;
 	song->speed=6;
-	_XM_DEBUG_PRINTF("4\n");
 	
 	return song;
 }
@@ -2603,7 +2600,77 @@ void xm_loader_set_fileio( XM_FileIO *p_fileio ) {
 }
 
 
-static void _xm_clear_song( XM_Song *p_song, xm_u32 p_pattern_count, xm_u32 p_instrument_count ) {
+static void _xm_clear_song( XM_Song *p_song, xm_s32 p_pattern_count, xm_s32 p_instrument_count ) {
+	
+	int i;
+	
+	/**
+	  * Erasing must be done in the opposite way as creating.
+	  * This way, allocating memory and deallocating memory from a song can work like a stack,
+	  * to simplify the memory allocator in some implementations.
+	  */
+	
+	_XM_AUDIO_LOCK
+	
+	/* Instruments first */
+	
+	for (i=(p_instrument_count-1);i>=0;i--) {
+		
+		if (i>=p_song->instrument_count) {
+			
+			_XM_ERROR_PRINTF("Invalid clear instrument amount specified.");
+			continue;
+		}
+		
+		if ( p_song->instrument_data[i] ) {
+			
+			XM_Instrument *ins = p_song->instrument_data[i];
+			int j;
+			
+			for (j=(ins->sample_count-1);j>=0;j--) {
+				
+				if (ins->samples[j].sample_id!=XM_INVALID_SAMPLE_ID) {
+					
+					_xm_mixer->sample_unregister( ins->samples[j].sample_id );
+				}
+			}
+			
+			if (ins->samples) {
+				_xm_memory->free( ins->samples, XM_MEMORY_ALLOC_INSTRUMENT );
+			}
+			_xm_memory->free( p_song->instrument_data[i], XM_MEMORY_ALLOC_INSTRUMENT );
+		}
+	}
+	
+	if ( p_song->instrument_data && p_instrument_count>=0) {
+		
+		_xm_memory->free( p_song->instrument_data, XM_MEMORY_ALLOC_INSTRUMENT );
+		p_song->instrument_data=0;
+	}
+	
+
+	
+	/* Patterns Last */
+	for (i=(p_pattern_count-1);i>=0;i--) {
+		
+		if (i>=p_song->pattern_count) {
+			
+			_XM_ERROR_PRINTF("Invalid clear pattern amount specified.");
+			continue;
+		}
+		
+		if ( p_song->pattern_data[i] ) {
+			_xm_memory->free( p_song->pattern_data[i], XM_MEMORY_ALLOC_PATTERN );
+		}
+	}
+	
+	if ( p_song->pattern_data && p_pattern_count) {
+		
+		_xm_memory->free( p_song->pattern_data, XM_MEMORY_ALLOC_PATTERN );
+		p_song->pattern_data=0;
+	}
+	
+	_XM_AUDIO_UNLOCK
 	
 	
 }
@@ -2841,7 +2908,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		return XM_LOADER_ERROR_FILE_CANT_OPEN;
 	};
 
-	_xm_clear_song( p_song, !p_load_music, !p_load_instruments );
+	_xm_clear_song( p_song, p_load_music?p_song->pattern_count:-1, p_load_instruments?p_song->instrument_count:-1 );
 	
         /**************************************
 	LOAD Identifier
@@ -2927,6 +2994,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 			
 #ifdef _XM_DEBUG			
 			_XM_DEBUG_PRINTF("Song Header:\n");
+			_XM_DEBUG_PRINTF("\tChannels: %i\n",chans);
 			_XM_DEBUG_PRINTF("\tOrders: %i\n",p_song->order_count);
 			_XM_DEBUG_PRINTF("\tPatterns: %i\n",p_song->pattern_count);
 			_XM_DEBUG_PRINTF("\tInstruments: %i\n",p_song->instrument_count);
@@ -2971,7 +3039,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		p_song->pattern_data = (xm_u8**)_xm_memory->alloc( sizeof(xm_u8*)*p_song->pattern_count , XM_MEMORY_ALLOC_PATTERN );
 		
 		if (!p_song->pattern_data) { /* Handle OUT OF MEMORY */
-			_xm_clear_song( p_song, 0, 0 );
+			/* _xm_clear_song( p_song, -1, -1 ); pointless */
 			f->close();
 			return XM_LOADER_ERROR_OUT_OF_MEMORY;			
 		}
@@ -2992,6 +3060,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		
 		
 		_XM_DEBUG_PRINTF("Pattern: %i\n",i);
+		_XM_DEBUG_PRINTF("\tHeader Len: %i\n",header_len);
 		_XM_DEBUG_PRINTF("\tRows: %i\n",rows);
 		_XM_DEBUG_PRINTF("\tPacked Size: %i\n",packed_data_size);
 		
@@ -3000,7 +3069,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		
 		if (p_load_music) {
 			
-			if (packed_data_size==0 && (rows==0 || rows==64)) {
+			if (packed_data_size==0) {
 				p_song->pattern_data[i]=0;
 				
 			} else if (packing==1) { /* pre packed pattern */
@@ -3010,7 +3079,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 				
 				if (!pdata) { /* Handle OUT OF MEMORY */
 					
-					_xm_clear_song( p_song, i, 0 );
+					_xm_clear_song( p_song, i, -1 );
 					f->close();
 					return XM_LOADER_ERROR_OUT_OF_MEMORY;					
 				}
@@ -3032,7 +3101,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 				
 				if (!pdata) { /* Handle OUT OF MEMORY */
 					
-					_xm_clear_song( p_song, i, 0 );
+					_xm_clear_song( p_song, i, -1 );
 					f->close();
 					return XM_LOADER_ERROR_OUT_OF_MEMORY;					
 				}
@@ -3062,7 +3131,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		
 		if (!p_song->instrument_data) { /* Handle OUT OF MEMORY */
 			
-			_xm_clear_song( p_song, p_load_music?p_song->pattern_count:0, 0 );
+			_xm_clear_song( p_song, p_load_music?p_song->pattern_count:-1, 0 );
 			f->close();
 			return XM_LOADER_ERROR_OUT_OF_MEMORY;			
 		}
@@ -3090,6 +3159,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		samples=f->get_u16();
 		
 		_XM_DEBUG_PRINTF("Instrument: %i\n",i);
+		_XM_DEBUG_PRINTF("\tHeader Len: %i\n",header_len);
 		
 		if (samples == 0 ) { /* empty instrument */
 			p_song->instrument_data[i]=0; /* no instrument by default */
@@ -3103,7 +3173,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 			
 			_XM_ERROR_PRINTF("\tHas invalid sample count: %i\n",samples);
 			
-			_xm_clear_song( p_song, p_load_music?p_song->pattern_count:0, i );
+			_xm_clear_song( p_song, p_load_music?p_song->pattern_count:-1, i );
 			f->close();
 			return XM_LOADER_ERROR_FILE_CORRUPT;
 			
@@ -3114,7 +3184,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		
 			if (!p_song->instrument_data[i]) { /* Out of Memory */
 			
-				_xm_clear_song( p_song, p_load_music?p_song->pattern_count:0, i );
+				_xm_clear_song( p_song, p_load_music?p_song->pattern_count:-1, i );
 				f->close();
 				return XM_LOADER_ERROR_OUT_OF_MEMORY;
 			}			
@@ -3129,7 +3199,8 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 		/* reset the samples */
 		_ins->samples=0;
 		
-		f->get_u32(); /* "sample header size" is redundant, so i ignore it */
+		xm_u32 sample_header_size=f->get_u32(); /* "sample header size" is redundant, so i ignore it */
+		_XM_DEBUG_PRINTF("\tSample Header Size: %i\n",sample_header_size);
 		
 		for (j=0;j<48;j++) {
 			/* convert to nibbles */
@@ -3216,7 +3287,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 					 
 		if (!_ins->samples) { /* Out of Memory */
 			
-			_xm_clear_song( p_song, p_load_music?p_song->pattern_count:0, i );
+			_xm_clear_song( p_song, p_load_music?p_song->pattern_count:-1, i );
 			f->close();
 			return XM_LOADER_ERROR_OUT_OF_MEMORY;
 		}
@@ -3295,7 +3366,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 						
 					if (!sample_data[j].data) { /* Out of Memory */
 				
-						_xm_clear_song( p_song, p_load_music?p_song->pattern_count:0, i );
+						_xm_clear_song( p_song, p_load_music?p_song->pattern_count:-1, i );
 						f->close();
 						return XM_LOADER_ERROR_OUT_OF_MEMORY;
 					}
@@ -3433,12 +3504,12 @@ void xm_loader_free_song( XM_Song *p_song ) {
 }
 void xm_loader_free_music( XM_Song *p_song ) {
 	
-	_xm_clear_song( p_song, p_song->pattern_count, 0 );
+	_xm_clear_song( p_song, p_song->pattern_count, -1 );
 	
 }
 void xm_loader_free_instruments( XM_Song *p_song ) {
 	
-	_xm_clear_song( p_song, 0, p_song->instrument_count );
+	_xm_clear_song( p_song, -1, p_song->instrument_count );
 	
 }
 

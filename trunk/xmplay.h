@@ -128,8 +128,8 @@ typedef xm_s32 XM_SampleID;
   * Chibi XM Play provides a default software mixer, but for portability issues, or taking advantage of 
   * a certain architecture or mixing hardware, the mixer can be reimplemented for any other backend.
   *
-  * Methods tagged with *LOCK* mean that they are must not be called directly 
-  * by the user, unless locking/unlocking is performed before/after calling them, or calling from the same
+  * Methods tagged with *LOCK* mean that they must not be called directly by the user, 
+  * unless locking/unlocking is performed before/after calling them, or calling from the same
   * thread as the process callback.
   */
 
