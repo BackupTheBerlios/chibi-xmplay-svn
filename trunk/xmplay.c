@@ -3398,11 +3398,9 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 							data[k]=d+old;
 							old=data[k];
 						}
-						printf("pad sample mem? %i\n",_xm_mixer->get_features());
 						if (pad_sample_mem) {
 							/* interpolation helper */
 							/* these make looping smoother */
-							printf("PADDING\n");
 							switch( sample_data[j].loop_type ) {
 								
 								case XM_LOOP_DISABLED: data[sample_data[j].length]=0; break;
@@ -3425,7 +3423,6 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 						if (pad_sample_mem) {
 							/* interpolation helper */
 							/* these make looping smoother */
-							printf("PADDING\n");
 							switch( sample_data[j].loop_type ) {
 								
 								case XM_LOOP_DISABLED: data[sample_data[j].length]=0; break;
