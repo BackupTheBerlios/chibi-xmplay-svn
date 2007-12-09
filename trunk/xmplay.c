@@ -1,6 +1,6 @@
 #include "xmplay.h"
 
-//#define _XM_DEBUG
+/*#define _XM_DEBUG*/
 
 #ifdef _XM_DEBUG_CUSTOM_H
 	#include _XM_DEBUG_CUSTOM_H
@@ -2096,7 +2096,6 @@ static _XM_INLINE void _xm_player_process_effects_and_envelopes()
 					} break;
 					case _XM_FX_EA_FINE_VOL_SLIDE_UP: {
 						xm_u8 param;
-						xm_s8 new_vol;
 						if (p->tick_counter!=0)
 							break;
 						param=(eparam>0)?eparam:ch->fx_EA_memory;
@@ -2108,7 +2107,6 @@ static _XM_INLINE void _xm_player_process_effects_and_envelopes()
 					case _XM_FX_EB_FINE_VOL_SLIDE_DOWN: {
 
 						xm_u8 param;
-						xm_s8 new_vol;
 						if (p->tick_counter!=0)
 							break;
 						param=(eparam>0)?eparam:ch->fx_EB_memory;
