@@ -193,7 +193,14 @@ static void _xm_sw_voice_start(xm_u8 p_voice,XM_SampleID p_sample,xm_u32 p_offse
 	m->voices[p_voice].offset<<=_XM_SW_FRAC_SIZE; /* convert to fixed point */
 	m->voices[p_voice].start=xm_true;
 	m->voices[p_voice].active=xm_true;
-	m->voices[p_voice].increment_fp=0;
+	xm_u32 base_sample_rate = m->sample_pool[p_sample].base_sample_rate;
+	if (base_sample_rate>0) {
+		m->voices[p_voice].increment_fp=((xm_s64)base_sample_rate<<_XM_SW_FRAC_SIZE)/m->sampling_rate;
+		m->voices[p_voice].volume=255;		
+		m->voices[p_voice].pan=255;		
+	} else {
+		m->voices[p_voice].increment_fp=0;
+	}
 
 }
 
@@ -3387,6 +3394,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 					sample_data[j].loop_end = loop_end;
 
 					sample_data[j].length = length;
+					sample_data[j].base_sample_rate=0;
 
 					if (sample_data[j].format==XM_SAMPLE_FORMAT_PCM16) {
 						sample_data[j].length/=2; /* cut in half,since length is bytes */
@@ -3574,9 +3582,6 @@ XM_SampleID xm_load_wav(const char *p_file)
 	/* GET FILESIZE xm_u32 filesize=f->get_u32(); */
 	f->get_u32();
 
-
-
-
 	/* CHECK WAVE */
 	char wave[4];
 
@@ -3593,7 +3598,9 @@ XM_SampleID xm_load_wav(const char *p_file)
 	int format_bits=0;
 	int format_channels=0;
 	int format_freq=0;
-
+	
+	int id=XM_INVALID_SAMPLE_ID;
+	
 	while (!f->eof_reached())
 	{
 		/* chunk */
@@ -3617,16 +3624,14 @@ XM_SampleID xm_load_wav(const char *p_file)
 			xm_u16 compression_code=f->get_u16();
 
 			if (compression_code!=1) {
-				_XM_DEBUG_PRINTF("Format not supported for WAVE file (not PCM)");
-				return XM_INVALID_SAMPLE_ID;
+				_XM_DEBUG_PRINTF("Format not supported for WAVE file (not PCM)\n");
 				break;
 			}
 
 			format_channels=f->get_u16();
 			if (format_channels!=1 && format_channels !=2)
 			{
-				_XM_DEBUG_PRINTF("Format not supported for WAVE file (not stereo or mono)");
-				return XM_INVALID_SAMPLE_ID;
+				_XM_DEBUG_PRINTF("Format not supported for WAVE file (not stereo or mono)\n");
 				break;
 			}
 
@@ -3643,8 +3648,7 @@ XM_SampleID xm_load_wav(const char *p_file)
 			format_bits=f->get_u16();
 
 			if (format_bits%8) {
-				_XM_DEBUG_PRINTF("Strange number of bits in sample (not 8,16,24,32)");
-				return XM_INVALID_SAMPLE_ID;
+				_XM_DEBUG_PRINTF("Strange number of bits in sample (not 8,16,24,32)\n");
 				break;
 			}
 
@@ -3656,8 +3660,7 @@ XM_SampleID xm_load_wav(const char *p_file)
 		if (chunkID[0]=='d' && chunkID[1]=='a' && chunkID[2]=='t' && chunkID[3]=='a')
 		{
 			if(!format_found) {
-				_XM_DEBUG_PRINTF("'data' chunk before 'format' chunk found.");
-				return XM_INVALID_SAMPLE_ID;
+				_XM_DEBUG_PRINTF("'data' chunk before 'format' chunk found.\n");
 				break;
 			}
 
@@ -3672,10 +3675,11 @@ XM_SampleID xm_load_wav(const char *p_file)
 			p_sample.loop_end         = 0;
 			p_sample.length           = frames;
 			p_sample.base_sample_rate = format_freq;
+			_XM_DEBUG_PRINTF("Base Sample Rate %i\n",format_freq);
 
 			if(!p_sample.data) {
-				_XM_DEBUG_PRINTF("ERROR");
-				return XM_INVALID_SAMPLE_ID;
+				_XM_DEBUG_PRINTF("ERROR\n");
+				break;
 			}
 
 
@@ -3716,9 +3720,16 @@ XM_SampleID xm_load_wav(const char *p_file)
 
 
 			if (f->eof_reached()) {
-				_XM_DEBUG_PRINTF("File corrupted");
-				return XM_INVALID_SAMPLE_ID;
+				_XM_DEBUG_PRINTF("File corrupted\n");
 				break;
+			} else {
+			
+				/** Mixer takes ownership of the sample data */
+				_XM_AUDIO_LOCK;
+				id=_xm_mixer->sample_register(&p_sample);
+				_XM_AUDIO_UNLOCK;
+				_XM_DEBUG_PRINTF("WAV load OK!\n");
+				break;				
 			}
 		}
 
@@ -3727,16 +3738,10 @@ XM_SampleID xm_load_wav(const char *p_file)
 
 	f->close();
 
-	/** Mixer takes ownership of the sample data */
-	_XM_AUDIO_LOCK;
-	XM_SampleID newID = _xm_mixer->sample_register(&p_sample);
-	_XM_AUDIO_UNLOCK;
-
-	return newID;
+	return id;
 }
 
-int xm_sfx_start(XM_SampleID sample)
-{
+int xm_sfx_start(XM_SampleID sample) {
 	/*
 	int song_chans       = _(xm_song->flags&XM_SONG_FLAGS_MASK_CHANNELS_USED) + 1;
 	int mixer_max_voices = _xm_mixer->get_features()&XM_MIXER_FEATURE_MAX_VOICES_MASK;
@@ -3744,41 +3749,35 @@ int xm_sfx_start(XM_SampleID sample)
 	return 0;
 }
 
-void xm_sfx_start_voice(XM_SampleID sample,int voice)
-{
+void xm_sfx_start_voice(XM_SampleID sample,int voice) {
 	_XM_AUDIO_LOCK;
 	_xm_mixer->voice_start(voice, sample, 0);
 	_XM_AUDIO_UNLOCK;
 }
 
-void xm_sfx_set_vol(int voice, xm_u8 vol)
-{
+void xm_sfx_set_vol(int voice, xm_u8 vol) {
 	_XM_AUDIO_LOCK;
 	_xm_mixer->voice_set_volume(voice, vol);
 	_XM_AUDIO_UNLOCK;
 }
 
-void xm_sfx_set_pan(int p_voice, xm_u8 pan)
-{
+void xm_sfx_set_pan(int p_voice, xm_u8 pan) {
 	_XM_AUDIO_LOCK;
 	_xm_mixer->voice_set_pan(p_voice, pan);
 	_XM_AUDIO_UNLOCK;
 }
 
-void xm_sfx_set_pitch(int p_voice, xm_u32 pitch_hz)
-{
+void xm_sfx_set_pitch(int p_voice, xm_u32 pitch_hz) {
+
 	_XM_AUDIO_LOCK;
 	_xm_mixer->voice_set_speed(p_voice, pitch_hz);
 	_XM_AUDIO_UNLOCK;
 }
 
-void xm_sfx_stop(int voice)
-{
+void xm_sfx_stop(int voice) {
+
 	_XM_AUDIO_LOCK;
 	_xm_mixer->voice_stop(voice);
 	_XM_AUDIO_UNLOCK;
 }
-
-
-
 

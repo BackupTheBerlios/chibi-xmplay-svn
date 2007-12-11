@@ -164,6 +164,7 @@ void fileio_seek_pos(xm_u32 p_offset) {
 	
 	fseek(f,p_offset,SEEK_SET);
 }
+
 xm_u32 fileio_get_pos() {
 	
 	if (!f) {
@@ -173,6 +174,17 @@ xm_u32 fileio_get_pos() {
 	}
 	
 	return ftell(f);
+}
+
+xm_bool fileio_eof_reached() {
+	
+	if (!f) {
+		
+		fprintf(stderr,"File Not Open!");
+		return xm_true;	
+	}
+	
+	return feof(f)?xm_true:xm_false;
 }
 
 
@@ -282,6 +294,7 @@ int main(int argc, char *argv[]) {
 	file_io.get_byte_array=fileio_get_byte_array;
 	file_io.seek_pos=fileio_seek_pos;
 	file_io.get_pos=fileio_get_pos;
+	file_io.eof_reached=fileio_eof_reached;
 	file_io.close=fileio_close;
 	
 	xm_loader_set_fileio( &file_io );
@@ -331,6 +344,9 @@ int main(int argc, char *argv[]) {
 	xm_player_play();
 	
 	SDL_PauseAudio(0);
+
+	XM_SampleID id = xm_load_wav("laralin1.wav");
+	xm_sfx_start_voice(id,15);
 	
 	while(1) { SDL_Delay(50); }
 	
