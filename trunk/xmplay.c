@@ -1,6 +1,6 @@
 #include "xmplay.h"
 
-/*#define _XM_DEBUG*/
+/* #define _XM_DEBUG */
 
 #ifdef _XM_DEBUG_CUSTOM_H
 	#include _XM_DEBUG_CUSTOM_H
@@ -2105,7 +2105,6 @@ static _XM_INLINE void _xm_player_process_effects_and_envelopes()
 						_xm_player_do_volume_slide_up(ch, param);
 					} break;
 					case _XM_FX_EB_FINE_VOL_SLIDE_DOWN: {
-
 						xm_u8 param;
 						if (p->tick_counter!=0)
 							break;
@@ -3543,6 +3542,241 @@ void xm_loader_free_instruments( XM_Song *p_song ) {
 
 	_xm_clear_song( p_song, -1, p_song->instrument_count );
 
+}
+
+
+
+
+XM_SampleID xm_load_wav(const char *p_file)
+{
+	XM_FileIO *f=_xm_fileio;
+	XM_SampleData p_sample;
+
+
+
+	if(f->open( p_file, xm_false) != XM_FILE_OK) {
+		_XM_DEBUG_PRINTF("[xm_load_wav] Failed to open file.");
+		return XM_INVALID_SAMPLE_ID;
+	}
+
+	/* CHECK RIFF */
+	char riff[5];
+	riff[4]=0;
+	f->get_byte_array((xm_u8*)&riff,4);
+
+	if (riff[0]!='R' || riff[1]!='I' || riff[2]!='F' || riff[3]!='F') {
+		f->close();
+		_XM_DEBUG_PRINTF("[xm_load_wav] Invalid file format.");
+		return XM_INVALID_SAMPLE_ID;
+	}
+
+
+	/* GET FILESIZE xm_u32 filesize=f->get_u32(); */
+	f->get_u32();
+
+
+
+
+	/* CHECK WAVE */
+	char wave[4];
+
+	f->get_byte_array((xm_u8*)&wave,4);
+
+	if (wave[0]!='W' || wave[1]!='A' || wave[2]!='V' || wave[3]!='E')
+	{
+		f->close();
+		_XM_DEBUG_PRINTF("[xm_load_wav] Invalid file format.");
+		return XM_INVALID_SAMPLE_ID;
+	}
+
+	xm_bool format_found = xm_false;
+	int format_bits=0;
+	int format_channels=0;
+	int format_freq=0;
+
+	while (!f->eof_reached())
+	{
+		/* chunk */
+		char chunkID[4];
+		f->get_byte_array((xm_u8*)&chunkID,4);
+
+		/* chunk size */
+		xm_u32 chunksize = f->get_u32();
+		xm_u32 file_pos  = f->get_pos();
+
+		if (f->eof_reached()) {
+			_XM_DEBUG_PRINTF("EOF AFTER read chunk header and chunk size reached. breaking.\n");
+			break;
+		}
+
+		_XM_DEBUG_PRINTF("READ CHUNK: '%c%c%c%c' x %d\n", chunkID[0], chunkID[1], chunkID[2], chunkID[3], chunksize);
+
+		/* FORMAT CHUNK */
+		if (chunkID[0]=='f' && chunkID[1]=='m' && chunkID[2]=='t' && chunkID[3]==' ' && !format_found)
+		{
+			xm_u16 compression_code=f->get_u16();
+
+			if (compression_code!=1) {
+				_XM_DEBUG_PRINTF("Format not supported for WAVE file (not PCM)");
+				return XM_INVALID_SAMPLE_ID;
+				break;
+			}
+
+			format_channels=f->get_u16();
+			if (format_channels!=1 && format_channels !=2)
+			{
+				_XM_DEBUG_PRINTF("Format not supported for WAVE file (not stereo or mono)");
+				return XM_INVALID_SAMPLE_ID;
+				break;
+			}
+
+			/* sampling rate */
+			format_freq=f->get_u32();
+
+			/* average bits/second (unused) */
+			f->get_u32();
+
+			/* block align (unused) */
+			f->get_u16();
+
+			/* bits per sample */
+			format_bits=f->get_u16();
+
+			if (format_bits%8) {
+				_XM_DEBUG_PRINTF("Strange number of bits in sample (not 8,16,24,32)");
+				return XM_INVALID_SAMPLE_ID;
+				break;
+			}
+
+			/* Dont need anything else, continue */
+			format_found=xm_true;
+		}
+
+		/* DATA CHUNK */
+		if (chunkID[0]=='d' && chunkID[1]=='a' && chunkID[2]=='t' && chunkID[3]=='a')
+		{
+			if(!format_found) {
+				_XM_DEBUG_PRINTF("'data' chunk before 'format' chunk found.");
+				return XM_INVALID_SAMPLE_ID;
+				break;
+			}
+
+			int frames=chunksize;
+			frames/=format_channels;
+			frames/=(format_bits>>3);
+
+			p_sample.data             = (void*)_xm_memory->alloc(chunksize, XM_MEMORY_ALLOC_WAV);
+			p_sample.format           = format_bits == 8 ? XM_SAMPLE_FORMAT_PCM8 : XM_SAMPLE_FORMAT_PCM16;
+			p_sample.loop_type        = XM_LOOP_DISABLED;
+			p_sample.loop_begin       = 0;
+			p_sample.loop_end         = 0;
+			p_sample.length           = frames;
+			p_sample.base_sample_rate = format_freq;
+
+			if(!p_sample.data) {
+				_XM_DEBUG_PRINTF("ERROR");
+				return XM_INVALID_SAMPLE_ID;
+			}
+
+
+			void * data_ptr=p_sample.data;
+
+			int i, c, b;
+			for (i=0;i<frames;i++)
+			{
+				for (c=0;c<format_channels;c++)
+				{
+					/* 8 bit samples are UNSIGNED */
+					if (format_bits==8)
+					{
+						xm_u8 s = f->get_u8();
+						s-=128;
+						xm_s8 *sp=(xm_s8*)&s;
+
+						xm_s8 *data_ptr8=&((xm_s8*)data_ptr)[i*format_channels+c];
+
+						*data_ptr8=*sp;
+
+					/* 16+ bits samples are SIGNED */
+					} else {
+						xm_u16 s = f->get_u16();
+						xm_s16 *sp=(xm_s16*)&s;
+
+						/* if sample is > 16 bits, just read extra bytes */
+						for (b=0;b<((format_bits>>3)-2);b++) {
+							f->get_u8();
+						}
+
+						xm_s16 *data_ptr16=&((xm_s16*)data_ptr)[i*format_channels+c];
+
+						*data_ptr16=*sp;
+					}
+				}
+			}
+
+
+			if (f->eof_reached()) {
+				_XM_DEBUG_PRINTF("File corrupted");
+				return XM_INVALID_SAMPLE_ID;
+				break;
+			}
+		}
+
+		f->seek_pos( file_pos+chunksize );
+	}
+
+	f->close();
+
+	/** Mixer takes ownership of the sample data */
+	_XM_AUDIO_LOCK;
+	XM_SampleID newID = _xm_mixer->sample_register(&p_sample);
+	_XM_AUDIO_UNLOCK;
+
+	return newID;
+}
+
+int xm_sfx_start(XM_SampleID sample)
+{
+	/*
+	int song_chans       = _(xm_song->flags&XM_SONG_FLAGS_MASK_CHANNELS_USED) + 1;
+	int mixer_max_voices = _xm_mixer->get_features()&XM_MIXER_FEATURE_MAX_VOICES_MASK;
+	*/
+	return 0;
+}
+
+void xm_sfx_start_voice(XM_SampleID sample,int voice)
+{
+	_XM_AUDIO_LOCK;
+	_xm_mixer->voice_start(voice, sample, 0);
+	_XM_AUDIO_UNLOCK;
+}
+
+void xm_sfx_set_vol(int voice, xm_u8 vol)
+{
+	_XM_AUDIO_LOCK;
+	_xm_mixer->voice_set_volume(voice, vol);
+	_XM_AUDIO_UNLOCK;
+}
+
+void xm_sfx_set_pan(int p_voice, xm_u8 pan)
+{
+	_XM_AUDIO_LOCK;
+	_xm_mixer->voice_set_pan(p_voice, pan);
+	_XM_AUDIO_UNLOCK;
+}
+
+void xm_sfx_set_pitch(int p_voice, xm_u32 pitch_hz)
+{
+	_XM_AUDIO_LOCK;
+	_xm_mixer->voice_set_speed(p_voice, pitch_hz);
+	_XM_AUDIO_UNLOCK;
+}
+
+void xm_sfx_stop(int voice)
+{
+	_XM_AUDIO_LOCK;
+	_xm_mixer->voice_stop(voice);
+	_XM_AUDIO_UNLOCK;
 }
 
 
