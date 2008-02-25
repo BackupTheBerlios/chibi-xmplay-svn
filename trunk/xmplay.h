@@ -365,4 +365,5 @@ void xm_sfx_set_pan(int voice, xm_u8 pan);
 void xm_sfx_set_pitch(int voice, xm_u32 pitch_hz);
 void xm_sfx_stop(int voice);
 
+void xm_loader_set_recompress_all_samples(xm_bool p_enable); /** recompress ALL samples to ima-adpcm while loading */
 #endif

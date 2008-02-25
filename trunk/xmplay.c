@@ -1,5 +1,6 @@
-#include "xmplay.h"
 
+#include "xmplay.h"
+#include <stdlib.h>	
 /* #define _XM_DEBUG */
 
 #ifdef _XM_DEBUG_CUSTOM_H
@@ -119,6 +120,23 @@ XM_Mixer *xm_get_mixer() {
 #define DECLICKER_FADE_BITS 5
 #define DECLICKER_FADE_SIZE (1<<DECLICKER_FADE_BITS)
 
+static const xm_s16 _xm_ima_adpcm_step_table[89] = { 
+	7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 
+	19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 
+	50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 
+	130, 143, 157, 173, 190, 209, 230, 253, 279, 307,
+	337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+	876, 963, 1060, 1166, 1282, 1411, 1552, 1707, 1878, 2066, 
+	2272, 2499, 2749, 3024, 3327, 3660, 4026, 4428, 4871, 5358,
+	5894, 6484, 7132, 7845, 8630, 9493, 10442, 11487, 12635, 13899, 
+	15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767 
+};
+
+static const xm_s8 _xm_ima_adpcm_index_table[16] = {
+	-1, -1, -1, -1, 2, 4, 6, 8,
+	-1, -1, -1, -1, 2, 4, 6, 8	
+};
+
 typedef struct {
 
 	XM_SampleID sample;
@@ -131,7 +149,16 @@ typedef struct {
 	xm_bool active;
 	xm_u8 volume; /* 0 .. 255 */
 	xm_u8 pan;  /* 0 .. 255 */
-
+	
+	struct {
+		
+		xm_s16 step_index;
+		xm_s32 predictor;
+		/* values at loop point */
+		xm_s16 loop_step_index;
+		xm_s32 loop_predictor;
+		xm_s32 last_nibble;
+	} ima_adpcm;
 
 } _XM_SoftwareMixerVoice;
 
@@ -189,7 +216,7 @@ static void _xm_sw_voice_start(xm_u8 p_voice,XM_SampleID p_sample,xm_u32 p_offse
 	}
 
 	m->voices[p_voice].sample=p_sample;
-	m->voices[p_voice].offset=p_offset;
+	m->voices[p_voice].offset=(m->sample_pool[p_sample].format!=XM_SAMPLE_FORMAT_IMA_ADPCM)?p_offset:0;
 	m->voices[p_voice].offset<<=_XM_SW_FRAC_SIZE; /* convert to fixed point */
 	m->voices[p_voice].start=xm_true;
 	m->voices[p_voice].active=xm_true;
@@ -200,6 +227,15 @@ static void _xm_sw_voice_start(xm_u8 p_voice,XM_SampleID p_sample,xm_u32 p_offse
 		m->voices[p_voice].pan=255;		
 	} else {
 		m->voices[p_voice].increment_fp=0;
+	}
+	
+	if (m->sample_pool[p_sample].format==XM_SAMPLE_FORMAT_IMA_ADPCM) {
+		/* IMA ADPCM SETUP */
+		m->voices[p_voice].ima_adpcm.step_index=0;
+		m->voices[p_voice].ima_adpcm.predictor=0;
+		m->voices[p_voice].ima_adpcm.loop_step_index=0;
+		m->voices[p_voice].ima_adpcm.loop_predictor=0;
+		m->voices[p_voice].ima_adpcm.last_nibble=-1;				
 	}
 
 }
@@ -538,6 +574,11 @@ void _xm_sw_software_mix_voice_to_buffer( xm_u8 p_voice, xm_s32 *p_buffer, xm_u3
 	vol_l_inc=((dst_vol_l-v->oldvol_l)<<_XM_SW_VOL_FRAC_SIZE)/p_frames;
 	vol_r_inc=((dst_vol_r-v->oldvol_r)<<_XM_SW_VOL_FRAC_SIZE)/p_frames;
 
+	XM_LoopType loop_type = s->loop_type;
+	if (loop_type==XM_LOOP_PING_PONG && s->format==XM_SAMPLE_FORMAT_IMA_ADPCM) {
+		
+		loop_type=XM_LOOP_FORWARD;
+	}
 	/* @TODO validar loops al registrar , pedir un poco mas de memoria para interpolar */
 
 	while (todo>0) {
@@ -550,10 +591,10 @@ void _xm_sw_software_mix_voice_to_buffer( xm_u8 p_voice, xm_s32 *p_buffer, xm_u3
 		if ( v->increment_fp < 0 ) {
 			/* going backwards */
 
-			if(  s->loop_type!=XM_LOOP_DISABLED && v->offset < loop_begin_fp ) {
+			if(  loop_type!=XM_LOOP_DISABLED && v->offset < loop_begin_fp ) {
 				/* loopstart reached */
 
-				if ( s->loop_type==XM_LOOP_PING_PONG ) {
+				if ( loop_type==XM_LOOP_PING_PONG ) {
 					/* bounce ping pong */
 					v->offset= loop_begin_fp + ( loop_begin_fp-v->offset );
 					v->increment_fp=-v->increment_fp;
@@ -571,16 +612,25 @@ void _xm_sw_software_mix_voice_to_buffer( xm_u8 p_voice, xm_s32 *p_buffer, xm_u3
 			}
 		} else {
 			/* going forward */
-			if(  s->loop_type!=XM_LOOP_DISABLED && v->offset >= loop_end_fp ) {
+			if(  loop_type!=XM_LOOP_DISABLED && v->offset >= loop_end_fp ) {
 				/* loopend reached */
 
-				if ( s->loop_type==XM_LOOP_PING_PONG ) {
+				if ( loop_type==XM_LOOP_PING_PONG ) {
 					/* bounce ping pong */
 					v->offset=loop_end_fp-(v->offset-loop_end_fp);
 					v->increment_fp=-v->increment_fp;
 				} else {
 					/* go to loop-begin */
-					v->offset=loop_begin_fp+(v->offset-loop_end_fp);
+					if (s->format==XM_SAMPLE_FORMAT_IMA_ADPCM) {
+						v->ima_adpcm.step_index=v->ima_adpcm.loop_step_index;
+						v->ima_adpcm.predictor=v->ima_adpcm.loop_predictor;
+						v->ima_adpcm.last_nibble=loop_begin_fp>>_XM_SW_FRAC_SIZE;
+						v->offset=loop_begin_fp;
+					} else {
+						
+						v->offset=loop_begin_fp+(v->offset-loop_end_fp);
+						
+					}
 				}
 			} else {
 				/* no loop, check for end of sample */
@@ -670,7 +720,101 @@ void _xm_sw_software_mix_voice_to_buffer( xm_u8 p_voice, xm_s32 *p_buffer, xm_u3
 			} break;
 			case XM_SAMPLE_FORMAT_IMA_ADPCM: { /* ima-adpcm */
 
-				/* Not supported in software yet */
+				xm_u8 *src_ptr =  (xm_u8*)s->data;
+				src_ptr+=4;
+
+				while (target--) {
+
+					xm_s32 integer = (v->offset>>_XM_SW_FRAC_SIZE);
+					while(integer>v->ima_adpcm.last_nibble) {			
+						xm_s16 nibble,signed_nibble,diff,step;
+						
+						v->ima_adpcm.last_nibble++;
+						
+						nibble = (v->ima_adpcm.last_nibble&1)?
+								(src_ptr[v->ima_adpcm.last_nibble>>1]>>4):(src_ptr[v->ima_adpcm.last_nibble>>1]&0xF);
+						step=_xm_ima_adpcm_step_table[v->ima_adpcm.step_index];
+						
+						v->ima_adpcm.step_index += _xm_ima_adpcm_index_table[nibble];
+						if (v->ima_adpcm.step_index<0) 
+							v->ima_adpcm.step_index=0;
+						if (v->ima_adpcm.step_index>88)
+							v->ima_adpcm.step_index=88;
+
+						/*
+						signed_nibble = (nibble&7) * ((nibble&8)?-1:1);						
+						diff = (2 * signed_nibble + 1) * step / 4; */
+						
+						diff = step >> 3 ;
+						if (nibble & 1)
+							diff += step >> 2 ;
+						if (nibble & 2)
+							diff += step >> 1 ;
+						if (nibble & 4)
+							diff += step ;
+						if (nibble & 8)
+							diff = -diff ;
+						
+						v->ima_adpcm.predictor+=diff;
+						if (v->ima_adpcm.predictor<-0x8000)
+							v->ima_adpcm.predictor=0x8000;
+						else if (v->ima_adpcm.predictor>0x7FFF)
+							v->ima_adpcm.predictor=0x7FFF;
+							
+						
+						
+						/*
+						if (v->ima_adpcm.step_index<0)
+							v->ima_adpcm.step_index=0;
+						if (v->ima_adpcm.step_index>88)
+							v->ima_adpcm.step_index=88;
+						*/
+									
+						/*
+						sign = nibble & 8;
+						delta = nibble & 7;
+						diff=0;
+						if (delta & 4) 
+							diff += step;
+						step>>=1;
+						if (delta & 2) 
+							diff += step;
+						step>>=1;
+						if (delta & 1) 
+							diff += step;
+						step>>=1;
+						diff += step;
+						if (sign) {
+							v->ima_adpcm.predictor -= diff;
+							if (v->ima_adpcm.predictor<-0x8000) 
+								v->ima_adpcm.predictor = -0x8000;
+						} else {
+							v->ima_adpcm.predictor += diff; 	
+							if (v->ima_adpcm.predictor>0x7FFF) 
+								v->ima_adpcm.predictor = 0x7FFF;
+						}
+						*/					
+						/*printf("nibble %i, diff %i, predictor at %i\n",nibble,diff,v->ima_adpcm.predictor);*/
+												
+						/* store loop if there */
+						if (s->loop_type==XM_LOOP_FORWARD && v->ima_adpcm.last_nibble==s->loop_begin) {
+							
+							v->ima_adpcm.loop_step_index = v->ima_adpcm.step_index;
+							v->ima_adpcm.loop_predictor = v->ima_adpcm.predictor;
+						}
+														
+					}
+											
+					xm_s32 val = v->ima_adpcm.predictor;
+
+					*(p_buffer++) += val * (vol_l>>_XM_SW_VOL_FRAC_SIZE);
+					*(p_buffer++) += val * (vol_r>>_XM_SW_VOL_FRAC_SIZE);
+
+					vol_l+=vol_l_inc;
+					vol_r+=vol_r_inc;
+					v->offset+=v->increment_fp;
+
+				}
 			} break;
 			case XM_SAMPLE_FORMAT_CUSTOM: { /* Custom format, XM_Mixer should support this */
 
@@ -2637,7 +2781,12 @@ void xm_song_free(XM_Song *p_song) {
 *******************************/
 
 static XM_FileIO *_xm_fileio=0;
+static xm_bool _xm_loader_recompress_samples=xm_false;
 
+void xm_loader_set_recompress_all_samples(xm_bool p_enable) {
+	
+	_xm_loader_recompress_samples=xm_true;
+}
 void xm_loader_set_fileio( XM_FileIO *p_fileio ) {
 
 	_xm_fileio=p_fileio;
@@ -2727,6 +2876,8 @@ static void _xm_clear_song( XM_Song *p_song, xm_s32 p_pattern_count, xm_s32 p_in
  * @param p_dst_data recompress target pointer, if null, will just compute size
  * @return size of recompressed buffer
  */
+
+
 
 static xm_u32 _xm_recompress_pattern(xm_u16 p_rows,xm_u8 p_channels,void * p_dst_data) {
 
@@ -2918,6 +3069,147 @@ static xm_u32 _xm_recompress_pattern(xm_u16 p_rows,xm_u8 p_channels,void * p_dst
 #undef _XM_COMP_ADD_BYTE
 
 	return data_size;
+}
+
+static void _xm_loader_recompress_sample(XM_SampleData *p_sample_data) {
+	
+	int i,step_idx=0,prev=0;
+	XM_FileIO *f=_xm_fileio;
+	xm_u8 *out = (xm_u8*)p_sample_data->data;
+	int len=p_sample_data->length;
+	xm_s16 xm_prev=0;
+	
+	if (len&1)
+		len++;
+	
+	/* initial value is zero */
+	*(out++) =0;
+	*(out++) =0;
+	/* Table index initial value */	
+	*(out++) =0;
+	/* unused */	
+	*(out++) =0;
+	
+	
+#define _XM_GET_SAMPLE16 \
+((p_sample_data->format==XM_SAMPLE_FORMAT_PCM16)?(xm_s16)f->get_u16():(((xm_s16)((xm_s8)f->get_u8()))<<8))
+	
+	/*p_sample_data->data = (void*)malloc(len);
+	xm_s8 *dataptr=(xm_s8*)p_sample_data->data;*/
+	
+	
+	
+	for (i=0;i<len;i++) {
+		int step,diff,vpdiff,signed_nibble,p,mask;
+		xm_u8 nibble;
+		xm_s16 xm_sample = ((i==p_sample_data->length)?0:(_XM_GET_SAMPLE16));
+		xm_sample=xm_sample+xm_prev;
+		xm_prev=xm_sample;
+	
+		diff = (int)xm_sample - prev ;
+
+		nibble=0 ;
+		step =  _xm_ima_adpcm_step_table[ step_idx ];
+		vpdiff = step >> 3 ;
+		if (diff < 0) {	
+			nibble=8;
+			diff=-diff ;
+		}
+		mask = 4 ;
+		while (mask) {	
+		
+			if (diff >= step) {
+				
+				nibble |= mask;
+				diff -= step;
+				vpdiff += step;
+			}
+		
+			step >>= 1 ;
+			mask >>= 1 ;
+		};
+
+		if (nibble&8)
+			prev-=vpdiff ;
+		else
+			prev+=vpdiff ;
+
+		if (prev > 32767) {
+			printf("%i,xms %i, prev %i,diff %i, vpdiff %i, clip up %i\n",i,xm_sample,prev,diff,vpdiff,prev);
+			prev=32767;
+		} else if (prev < -32768) {
+			printf("%i,xms %i, prev %i,diff %i, vpdiff %i, clip down %i\n",i,xm_sample,prev,diff,vpdiff,prev);
+			prev = -32768 ;
+		}
+
+		step_idx += _xm_ima_adpcm_index_table[nibble];
+		if (step_idx< 0)
+			step_idx= 0 ;
+		else if (step_idx> 88)
+			step_idx= 88 ;
+
+		
+		if (i&1) {
+			*out|=nibble<<4;
+			out++;
+		} else {
+			*out=nibble;
+		}
+		/*dataptr[i]=prev>>8;*/
+		
+	
+	}
+	
+	p_sample_data->format=XM_SAMPLE_FORMAT_IMA_ADPCM;	
+	return;
+/*	
+	for (i=0;i<len;i++) {
+		int step,diff,signed_nibble,p;
+		xm_u8 nibble;
+		int xm_sample = ((i==p_sample_data->length)?0:(_XM_GET_SAMPLE16)) + xm_prev;
+		xm_prev=xm_sample;
+				
+		step = _xm_ima_adpcm_step_table[ step_idx ];
+		diff =  xm_sample - prev; 
+		nibble = (_XM_ABS(diff)<<2)/step;
+		signed_nibble=(diff<0)?-nibble:nibble;
+		
+		if (nibble>7) 
+			nibble=7;
+		step_idx+=_xm_ima_adpcm_index_table[nibble];
+		
+		if (step_idx<0) 
+			step_idx=0;
+		if (step_idx>88)
+			step_idx=88;
+				
+		if (diff<0)
+			nibble|=8;
+		
+		if (i&1) {
+			*out|=nibble<<4;
+			out++;
+		} else {
+			*out=nibble;
+		}
+		
+		p = (2 * signed_nibble + 1) * step / 4;
+		prev += p;
+		
+		if (prev<-0x8000) {
+			printf("clip %i up\n",i);
+			printf("clip original %i, adpcmd  %i\n",xm_sample,prev);
+			prev=-0x8000;
+		}
+		if (prev>0x7fff) {
+			prev=0x7fff;
+			printf("clip %i down\n",i);
+			printf("clip original %i, adpcmd  %i\n",xm_sample,prev);
+			
+		}
+	}
+*/	
+	
 }
 
 static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_Song *p_song, xm_bool p_load_music, xm_bool p_load_instruments )
@@ -3340,6 +3632,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 
 		{
 			XM_SampleData sample_data[XM_CONSTANT_MAX_SAMPLES_PER_INSTRUMENT];
+			xm_bool recompress_sample[16]; /* samples to recompress */
 
 			_XM_DEBUG_PRINTF("\tSample_Names:\n");
 			/** First pass, Sample Headers **/
@@ -3357,15 +3650,22 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 				_smp->pan = f->get_u8();
 				_smp->base_note = (xm_s8)f->get_u8();
 				f->get_u8(); /* reserved */
+				recompress_sample[j]=_xm_loader_recompress_samples;
 #ifdef _XM_DEBUG
 				_XM_DEBUG_PRINTF("\t\t%i- ",j);
 				for (k=0;k<22;k++) {
-					_XM_DEBUG_PRINTF("%c",f->get_u8());
+					char n=f->get_u8();
+					if (k==0 && n=='@')
+						recompress_sample[j]=xm_true;
+					_XM_DEBUG_PRINTF("%c",n);
 				}
 				_XM_DEBUG_PRINTF("\n");
 #else
-				for (k=0;k<22;k++)
-					f->get_u8(); /* skip sample name */
+				for (k=0;k<22;k++) {
+					char n=f->get_u8();
+					if (k==0 && n=='@')
+						recompress_sample[j]=xm_true;
+				}
 #endif
 
 				_XM_DEBUG_PRINTF("\tSample %i:, length %i\n",j,length);
@@ -3374,7 +3674,7 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 					/* SAMPLE DATA */
 
 					xm_bool pad_sample_mem=(_xm_mixer->get_features()&XM_MIXER_FEATURE_NEEDS_END_PADDING)?xm_true:xm_false;
-
+					
 					switch ((flags>>3) & 0x3) {
 						/* bit 3 of XM sample flags specify extended (propertary) format */
 						case 0: sample_data[j].format=XM_SAMPLE_FORMAT_PCM8; break;
@@ -3400,10 +3700,28 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 						sample_data[j].length/=2; /* cut in half,since length is bytes */
 						sample_data[j].loop_begin/=2; /* cut in half,since length is bytes */
 						sample_data[j].loop_end/=2; /* cut in half,since length is bytes */
-					}
-
+					} else if (sample_data[j].format==XM_SAMPLE_FORMAT_IMA_ADPCM) { 
+						
+						
+						sample_data[j].length-=4; /* remove header size */
+						sample_data[j].loop_begin-=4; /* remove header size */
+						
+						sample_data[j].length*=2; /* make twice,since length
+						 is bytes */
+						sample_data[j].loop_begin*=2; /* make twice,since length is bytes */
+						sample_data[j].loop_end*=2; /* make twice,since length is in bytes */ 			
+						
+								
+					} 			
+							
+					
 					sample_data[j].loop_end+=sample_data[j].loop_begin;
-
+					
+					if (recompress_sample[j]) {
+						/* ima adpcm uses 2 samples per byte, plus 4 for header */
+						length=sample_data[j].length/2+4;
+					}
+					
 					sample_data[j].data = _xm_memory->alloc( length + (pad_sample_mem?4:0), XM_MEMORY_ALLOC_SAMPLE );
 
 					if (!sample_data[j].data) { /* Out of Memory */
@@ -3430,56 +3748,66 @@ static XM_LoaderError _xm_loader_open_song_custom( const char *p_filename, XM_So
 				if (!sample_data[j].data)
 					continue; /* no data in sample, skip it */
 
-				switch (sample_data[j].format) {
-
-					case XM_SAMPLE_FORMAT_PCM16: {
-						xm_s16 *data=(xm_s16 *)sample_data[j].data;
-						xm_s16 old=0;
-						for (k=0;k<sample_data[j].length;k++) {
-							xm_s16 d=(xm_s16)f->get_u16();
-							data[k]=d+old;
-							old=data[k];
-						}
-						if (pad_sample_mem) {
-							/* interpolation helper */
-							/* these make looping smoother */
-							switch( sample_data[j].loop_type ) {
-
-								case XM_LOOP_DISABLED: data[sample_data[j].length]=0; break;
-								case XM_LOOP_FORWARD: data[sample_data[j].length]=data[sample_data[j].loop_begin]; break;
-								case XM_LOOP_PING_PONG: data[sample_data[j].length]=data[sample_data[j].loop_end]; break;
-
+				_XM_DEBUG_PRINTF("\tformat  %i\n",sample_data[j].format);
+				
+				if (recompress_sample[j]) {
+							
+					_XM_DEBUG_PRINTF("\trecompressing  %i\n",j);
+					_xm_loader_recompress_sample(&sample_data[j]);
+				} else {
+				
+					switch (sample_data[j].format) {
+	
+						case XM_SAMPLE_FORMAT_PCM16: {
+							
+							xm_s16 *data=(xm_s16 *)sample_data[j].data;
+							xm_s16 old=0;
+							for (k=0;k<sample_data[j].length;k++) {
+								xm_s16 d=(xm_s16)f->get_u16();
+								data[k]=d+old;
+								old=data[k];
 							}
-
-							data[sample_data[j].length+1]=0;
-						}
-					} break;
-					case XM_SAMPLE_FORMAT_PCM8: {
-						xm_s8 *data=(xm_s8 *)sample_data[j].data;
-						xm_s8 old=0;
-						for (k=0;k<sample_data[j].length;k++) {
-							xm_s8 d=(xm_s8)f->get_u8();
-							data[k]=d+old;
-							old=data[k];
-						}
-						if (pad_sample_mem) {
-							/* interpolation helper */
-							/* these make looping smoother */
-							switch( sample_data[j].loop_type ) {
-
-								case XM_LOOP_DISABLED: data[sample_data[j].length]=0; break;
-								case XM_LOOP_FORWARD: data[sample_data[j].length]=data[sample_data[j].loop_begin]; break;
-								case XM_LOOP_PING_PONG: data[sample_data[j].length]=data[sample_data[j].loop_end]; break;
-
+							if (pad_sample_mem) {
+								/* interpolation helper */
+								/* these make looping smoother */
+								switch( sample_data[j].loop_type ) {
+	
+									case XM_LOOP_DISABLED: data[sample_data[j].length]=0; break;
+									case XM_LOOP_FORWARD: data[sample_data[j].length]=data[sample_data[j].loop_begin]; break;
+									case XM_LOOP_PING_PONG: data[sample_data[j].length]=data[sample_data[j].loop_end]; break;
+	
+								}
+	
+								data[sample_data[j].length+1]=0;
 							}
-
-							data[sample_data[j].length+1]=0;
-						}
-					} break;
-					default: { /* just read it into memory */
-
-						f->get_byte_array((xm_u8*)sample_data[j].data,sample_data[j].length);
-					} break;
+						} break;
+						case XM_SAMPLE_FORMAT_PCM8: {
+							xm_s8 *data=(xm_s8 *)sample_data[j].data;
+							xm_s8 old=0;
+							for (k=0;k<sample_data[j].length;k++) {
+								xm_s8 d=(xm_s8)f->get_u8();
+								data[k]=d+old;
+								old=data[k];
+							}
+							if (pad_sample_mem) {
+								/* interpolation helper */
+								/* these make looping smoother */
+								switch( sample_data[j].loop_type ) {
+	
+									case XM_LOOP_DISABLED: data[sample_data[j].length]=0; break;
+									case XM_LOOP_FORWARD: data[sample_data[j].length]=data[sample_data[j].loop_begin]; break;
+									case XM_LOOP_PING_PONG: data[sample_data[j].length]=data[sample_data[j].loop_end]; break;
+	
+								}
+	
+								data[sample_data[j].length+1]=0;
+							}
+						} break;
+						default: { /* just read it into memory */
+	
+							f->get_byte_array((xm_u8*)sample_data[j].data,sample_data[j].length);
+						} break;
+					}
 				}
 
 				_smp->sample_id=_xm_mixer->sample_register( &sample_data[j] );

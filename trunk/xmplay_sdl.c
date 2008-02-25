@@ -323,7 +323,7 @@ int main(int argc, char *argv[]) {
 	
 	song = xm_song_alloc();
 	
-	
+	xm_loader_set_recompress_all_samples(xm_true);
 	song_error=xm_loader_open_song( argv[1], song );
 
 	switch (song_error) {
@@ -345,9 +345,6 @@ int main(int argc, char *argv[]) {
 	
 	SDL_PauseAudio(0);
 
-	XM_SampleID id = xm_load_wav("laralin1.wav");
-	xm_sfx_start_voice(id,15);
-	
 	while(1) { SDL_Delay(50); }
 	
 	
