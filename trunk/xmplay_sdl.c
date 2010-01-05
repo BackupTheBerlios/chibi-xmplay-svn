@@ -323,7 +323,7 @@ int main(int argc, char *argv[]) {
 	
 	song = xm_song_alloc();
 	
-	xm_loader_set_recompress_all_samples(xm_true);
+/*	xm_loader_set_recompress_all_samples(xm_true); */
 	song_error=xm_loader_open_song( argv[1], song );
 
 	switch (song_error) {
